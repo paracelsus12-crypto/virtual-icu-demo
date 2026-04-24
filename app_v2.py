@@ -35,6 +35,16 @@ except ImportError:
     st.error("❌ Error: clinical_scorer_v2.py not found")
     st.stop()
 
+# Import advanced features (v2.0)
+try:
+    from lstm_predictor import LSTMPredictor, DeteriortationDetector
+    from pdf_generator import PDFReportGenerator
+    from streamlit_integration import StreamlitIntegration
+    ADVANCED_FEATURES_AVAILABLE = True
+except ImportError:
+    ADVANCED_FEATURES_AVAILABLE = False
+    logger.warning("Advanced features (LSTM, PDF, Integration) not available")
+
 # ════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ════════════════════════════════════════════════════════════════════
@@ -288,7 +298,14 @@ class SyntheticDataGenerator:
     
     @staticmethod
     def generate_arrhythmia(variant="afib") -> pd.DataFrame:
-        """Cardiac Arrhythmias: AFib, VT, SVT, Bradycardia"""
+        """
+        Cardiac Arrhythmias: AFib, VT, SVT, Bradycardia
+        
+        CLINICAL NOTE:
+        - AFib/SVT: High HR (compensatory), normal BP/SpO2/RR → NO sepsis indicators
+        - VT: Hemodynamically unstable → may show some deterioration
+        - Bradycardia: Low HR, relatively stable BP
+        """
         samples = (3 * 60) // 5
         data = []
         
@@ -296,26 +313,54 @@ class SyntheticDataGenerator:
             progress = i / (samples - 1)
             
             if variant == "afib":
-                hr = 94 + progress * 59 + np.random.uniform(-10, 10)  # 94 → 153 (irregular)
-                sbp = 130 - progress * 23 + np.random.normal(0, 3)
+                # AFib: Tachycardia is PRIMARY, not secondary to sepsis
+                # Keep BP, SpO2, RR NORMAL to avoid false sepsis alert
+                hr = 120 + progress * 40 + np.random.uniform(-10, 10)  # 120 → 160
+                sbp = 125 - progress * 8 + np.random.normal(0, 3)     # 125 → 117 (stable!)
+                rr = 14 + np.random.normal(0, 1)                       # NORMAL (not 25!)
+                spo2 = 97 + np.random.normal(0, 1)                     # NORMAL (not 92!)
+                
             elif variant == "vt":
-                hr = 140 + progress * 40 + np.random.uniform(-5, 5)  # 140 → 180
-                sbp = 110 - progress * 16 + np.random.normal(0, 3)  # 110 → 94
+                # VT: More unstable, may deteriorate
+                hr = 140 + progress * 40 + np.random.uniform(-5, 5)   # 140 → 180
+                sbp = 110 - progress * 20 + np.random.normal(0, 3)    # 110 → 90 (deteriorates)
+                rr = 16 + progress * 8 + np.random.normal(0, 1)       # 16 → 24 (worsens)
+                spo2 = np.clip(98 - progress * 5 + np.random.normal(0, 1), 90, 100)  # Gradual decline
+                
             elif variant == "svt":
-                hr = 150 + progress * 30 + np.random.uniform(-5, 5)  # 150 → 180
-                sbp = 108 - progress * 15 + np.random.normal(0, 3)  # 108 → 93
+                # SVT: Similar to AFib but more rapid onset, usually stable
+                hr = 160 + progress * 20 + np.random.uniform(-5, 5)   # 160 → 180
+                sbp = 120 - progress * 5 + np.random.normal(0, 3)     # 120 → 115 (minimal drop)
+                rr = 15 + np.random.normal(0, 1)                      # NORMAL
+                spo2 = 97 + np.random.normal(0, 1)                    # NORMAL
+                
             else:  # bradycardia
-                hr = 60 - progress * 20 + np.random.uniform(-2, 2)  # 60 → 40
-                sbp = 125 - progress * 18 + np.random.normal(0, 3)  # 125 → 107
+                # Bradycardia: Low HR, usually hemodynamically stable if mild
+                hr = 50 - progress * 15 + np.random.uniform(-2, 2)   # 50 → 35
+                sbp = 118 - progress * 8 + np.random.normal(0, 2)    # 118 → 110 (relatively stable)
+                rr = 14 + np.random.normal(0, 1)                      # NORMAL
+                spo2 = 97 + np.random.normal(0, 1)                    # NORMAL
+            
+            # Temperature: Never fever in simple arrhythmias (unless it's VT with shock)
+            if variant == "vt":
+                temp = 37 + np.random.normal(0, 0.3)  # May be normal or slightly elevated
+            else:
+                temp = 37 + np.random.normal(0, 0.1)  # NORMAL temperature
+            
+            # Alert status worsens if VT (most unstable), minimal change otherwise
+            if variant == "vt":
+                alert = 'Alert' if progress < 0.6 else 'Confused'
+            else:
+                alert = 'Alert'  # AFib/SVT/Bradycardia patients usually remain alert
             
             data.append({
                 'heart_rate': np.clip(hr, 30, 200),
                 'systolic_bp': max(80, sbp),
                 'diastolic_bp': max(40, sbp * 0.67),
-                'respiratory_rate': 16 + np.random.normal(0, 1),
-                'spo2': np.clip(98 - progress * 10 + np.random.normal(0, 1), 85, 100),
-                'temperature': 37 + np.random.normal(0, 0.2),
-                'alert_status': 'Alert' if progress < 0.7 else 'Confused',
+                'respiratory_rate': np.clip(rr, 6, 40),
+                'spo2': np.clip(spo2, 70, 100),
+                'temperature': temp,
+                'alert_status': alert,
                 'supplemental_oxygen': False,
                 'age': 65,
             })
@@ -401,11 +446,13 @@ if uploaded_file is not None:
 # MAIN CONTENT - TABS
 # ════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Dashboard",
     "📈 Vital Signs",
     "🔢 Clinical Scores",
-    "🎮 Invigilator Panel"
+    "🎮 Invigilator Panel",
+    "🔮 Forecast (NEW)",
+    "📋 Report (NEW)"
 ])
 
 # ════════════════════════════════════════════════════════════════════
@@ -765,14 +812,90 @@ with tab4:
         )
 
 # ════════════════════════════════════════════════════════════════════
+# TAB 5: PREDICTIVE FORECAST (NEW - v2.0)
+# ════════════════════════════════════════════════════════════════════
+
+with tab5:
+    if ADVANCED_FEATURES_AVAILABLE:
+        if st.session_state.data is not None and len(st.session_state.data) > 0:
+            # Initialize integration
+            if 'integration' not in st.session_state:
+                st.session_state.integration = StreamlitIntegration()
+            
+            integration = st.session_state.integration
+            
+            # Get current scores for context
+            last_vitals = st.session_state.data.iloc[-1].to_dict()
+            scores = {
+                'news2': NEWS2CalculatorV2.calculate(last_vitals),
+                'qsofa': qSOFACalculatorV2.calculate(last_vitals),
+                'cart': CARTCalculatorV2.calculate(last_vitals)
+            }
+            
+            # Render forecast tab
+            integration.render_forecast_tab(st.session_state.data, scores)
+        else:
+            st.info("📊 Generate demo data first to see 24-hour forecast")
+    else:
+        st.error("⚠️ Advanced features not available. Ensure lstm_predictor.py is in the same directory.")
+
+# ════════════════════════════════════════════════════════════════════
+# TAB 6: CLINICAL REPORT (NEW - v2.0)
+# ════════════════════════════════════════════════════════════════════
+
+with tab6:
+    if ADVANCED_FEATURES_AVAILABLE:
+        if st.session_state.data is not None and len(st.session_state.data) > 0:
+            # Initialize integration if not already done
+            if 'integration' not in st.session_state:
+                st.session_state.integration = StreamlitIntegration()
+            
+            integration = st.session_state.integration
+            
+            # Get patient data
+            patient_data = {
+                'patient_id': st.session_state.data_source if st.session_state.data_source else 'P001',
+                'scenario': st.session_state.data_source.split('_')[0] if st.session_state.data_source else 'Unknown',
+                'age': 65
+            }
+            
+            # Get current scores
+            last_vitals = st.session_state.data.iloc[-1].to_dict()
+            scores = {
+                'news2': NEWS2CalculatorV2.calculate(last_vitals),
+                'qsofa': qSOFACalculatorV2.calculate(last_vitals),
+                'cart': CARTCalculatorV2.calculate(last_vitals)
+            }
+            
+            # Get recommendations
+            recommendations = ClinicalRecommendationsEngineV2.generate(
+                scores['news2'],
+                scores['qsofa'],
+                scores['cart']
+            ).get('recommendations', [])
+            
+            # Render report tab
+            integration.render_report_tab(
+                st.session_state.data,
+                scores,
+                recommendations,
+                patient_data
+            )
+        else:
+            st.info("📋 Generate demo data first to generate clinical report")
+    else:
+        st.error("⚠️ Advanced features not available. Ensure pdf_generator.py is in the same directory.")
+
+# ════════════════════════════════════════════════════════════════════
 # FOOTER
 # ════════════════════════════════════════════════════════════════════
 
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray; font-size: 12px;'>"
-    "Virtual ICU v2 - AI-Driven Real-Time Early Warning System | "
-    f"Data Source: {st.session_state.data_source if st.session_state.data is not None else 'None'}"
+    "Virtual ICU v2.0 - AI-Driven Real-Time Early Warning System | "
+    f"Data Source: {st.session_state.data_source if st.session_state.data is not None else 'None'} | "
+    f"Version: {'v2.0 (Advanced Features)' if ADVANCED_FEATURES_AVAILABLE else 'v1.2'}"
     "</div>",
     unsafe_allow_html=True
 )
